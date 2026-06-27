@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 import json
 from collections.abc import Callable, Mapping
+import os
 from pathlib import Path
+import threading
+from dataclasses import dataclass
 
 from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
@@ -22,6 +26,16 @@ ProgressCallback = Callable[[str, int, int], None]
 LogCallback = Callable[[str], None]
 AUTO_BATCH_MAX_ENTRIES = 25
 AUTO_BATCH_MAX_CHARS = 6000
+DEFAULT_MAX_WORKERS = 4
+MAX_WORKERS_ENV = "FTB_TRANSLATER_CONCURRENCY"
+
+
+@dataclass(frozen=True)
+class _BatchResult:
+    batch_index: int
+    batch: OrderedDict[str, str]
+    result: dict[str, str]
+    error: Exception | None = None
 
 
 def estimate_batches(total_entries: int, batch_size: int) -> int:
@@ -65,6 +79,7 @@ def translate_quests_lang(
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
+    max_workers: int | None = None,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -95,42 +110,38 @@ def translate_quests_lang(
 
     _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
 
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     total_pending = len(pending)
-    completed_pending = 0
     failed_entries: list[str] = []
     batches = build_translation_batches(pending, batch_size=batch_size)
     _log.info("Built %d batches for %d pending entries", len(batches), total_pending)
 
-    for batch_index, batch in enumerate(batches, start=1):
-        if progress:
-            progress("translating", completed_pending, total_pending)
-        msg = f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} lang entries."
-        _log.info(msg)
-        if logger:
-            logger(msg)
-        try:
-            result = client.translate_batch(batch, style=style)
-        except Exception as exc:  # noqa: BLE001
-            msg = f"Batch {batch_index} failed, preserving source text for this batch: {exc}"
-            _log.error(msg)
-            if logger:
-                logger(msg)
-            result = {}
+    batch_results = _translate_batches(
+        batches=batches,
+        api_key=api_key,
+        model=model,
+        style=style,
+        logger=logger,
+        progress=progress,
+        progress_total=total_pending,
+        label="lang entries",
+        translator=translator,
+        max_workers=max_workers,
+    )
+    for batch_result in sorted(batch_results, key=lambda item: item.batch_index):
+        batch = batch_result.batch
+        result = batch_result.result
+        if batch_result.error is not None:
             for key in batch:
-                failed_entries.append(f"{key}: {exc}")
-                result[key] = batch[key]
-
+                failed_entries.append(f"{key}: {batch_result.error}")
         for key, source_text in batch.items():
             translated_text = result.get(key, source_text)
+            translated_text, token_warnings = _guard_translation(source_text, translated_text)
             translated_values[key] = _text_to_lang_value(translated_text, source_values[key])
             if translated_text != source_text:
                 cache.set(source_text, model, "zh_cn", style, translated_text)
-            token_warnings = preserved_token_warnings(source_text, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for key %r: %s", key, token_warnings)
                 warnings[key] = token_warnings
-        completed_pending += len(batch)
 
     ordered_output: OrderedDict[str, LangValue] = OrderedDict()
     for key in source_values:
@@ -191,6 +202,7 @@ def translate_quests_chapters(
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
+    max_workers: int | None = None,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -208,7 +220,6 @@ def translate_quests_chapters(
     all_segments = [segment for segments in segments_by_file.values() for segment in segments]
     _log.debug("Extracted %d total text segments from %d chapter files", len(all_segments), len(files))
 
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     pending: OrderedDict[str, str] = OrderedDict()
     translations_by_file: dict[Path, dict[int, str]] = {path: {} for path in files}
     cache_hits = 0
@@ -227,39 +238,36 @@ def translate_quests_chapters(
     segment_by_id = {segment.cache_id: segment for segment in all_segments}
     batches = build_translation_batches(pending, batch_size=batch_size)
     _log.info("Built %d batches for %d pending segments", len(batches), len(pending))
-    completed_pending = 0
     failed_entries: list[str] = []
 
-    for batch_index, batch in enumerate(batches, start=1):
-        if progress:
-            progress("translating", completed_pending, len(pending))
-        msg = f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} chapter text entries."
-        _log.info(msg)
-        if logger:
-            logger(msg)
-        try:
-            result = client.translate_batch(batch, style=style)
-        except Exception as exc:  # noqa: BLE001
-            msg = f"Batch {batch_index} failed, preserving source text for this batch: {exc}"
-            _log.error(msg)
-            if logger:
-                logger(msg)
-            result = {}
-            for key, value in batch.items():
-                failed_entries.append(f"{key}: {exc}")
-                result[key] = value
-
+    batch_results = _translate_batches(
+        batches=batches,
+        api_key=api_key,
+        model=model,
+        style=style,
+        logger=logger,
+        progress=progress,
+        progress_total=len(pending),
+        label="chapter text entries",
+        translator=translator,
+        max_workers=max_workers,
+    )
+    for batch_result in sorted(batch_results, key=lambda item: item.batch_index):
+        batch = batch_result.batch
+        result = batch_result.result
+        if batch_result.error is not None:
+            for key in batch:
+                failed_entries.append(f"{key}: {batch_result.error}")
         for cache_id, source_text in batch.items():
             segment = segment_by_id[cache_id]
             translated_text = result.get(cache_id, source_text)
+            translated_text, token_warnings = _guard_translation(source_text, translated_text)
             translations_by_file[segment.path][segment.index] = translated_text
             if translated_text != source_text:
                 cache.set(source_text, model, "zh_cn", style, translated_text)
-            token_warnings = preserved_token_warnings(source_text, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for segment %r: %s", cache_id, token_warnings)
                 warnings[cache_id] = token_warnings
-        completed_pending += len(batch)
 
     msg = "Creating backup for chapters directory before overwrite."
     _log.info(msg)
@@ -310,12 +318,150 @@ def translate_quests_auto(
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
+    max_workers: int | None = None,
 ) -> TranslationReport:
     mode = detect_source_mode(quests_dir)
     _log.info("translate_quests_auto: mode=%s quests_dir=%s", mode, quests_dir)
     if mode == "lang":
-        return translate_quests_lang(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
-    return translate_quests_chapters(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
+        return translate_quests_lang(
+            quests_dir, api_key, batch_size, model, style, progress, logger, translator, max_workers
+        )
+    return translate_quests_chapters(
+        quests_dir, api_key, batch_size, model, style, progress, logger, translator, max_workers
+    )
+
+
+def _translate_batches(
+    batches: list[OrderedDict[str, str]],
+    api_key: str,
+    model: str,
+    style: str,
+    logger: LogCallback | None,
+    progress: ProgressCallback | None,
+    progress_total: int,
+    label: str,
+    translator: DeepSeekTranslator | None,
+    max_workers: int | None,
+) -> list[_BatchResult]:
+    worker_count = _resolve_max_workers(max_workers, len(batches))
+    if not batches:
+        if progress:
+            progress("done", 0, progress_total)
+        return []
+
+    if logger:
+        logger(f"DeepSeek concurrency: {worker_count} worker(s), {len(batches)} batches.")
+    _log.info("DeepSeek concurrency: %d worker(s), %d batches", worker_count, len(batches))
+
+    completed_entries = 0
+    results: list[_BatchResult] = []
+
+    if worker_count == 1:
+        for batch_index, batch in enumerate(batches, start=1):
+            if progress:
+                progress("translating", completed_entries, progress_total)
+            batch_result = _translate_one_batch(
+                batch_index=batch_index,
+                batch_count=len(batches),
+                batch=batch,
+                api_key=api_key,
+                model=model,
+                style=style,
+                logger=logger,
+                label=label,
+                translator=translator,
+            )
+            results.append(batch_result)
+            completed_entries += len(batch)
+        if progress:
+            progress("translating", completed_entries, progress_total)
+        return results
+
+    thread_state = threading.local()
+
+    def worker(batch_index: int, batch: OrderedDict[str, str]) -> _BatchResult:
+        worker_translator = translator
+        if worker_translator is None:
+            worker_translator = getattr(thread_state, "translator", None)
+            if worker_translator is None:
+                worker_translator = DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
+                thread_state.translator = worker_translator
+        return _translate_one_batch(
+            batch_index=batch_index,
+            batch_count=len(batches),
+            batch=batch,
+            api_key=api_key,
+            model=model,
+            style=style,
+            logger=logger,
+            label=label,
+            translator=worker_translator,
+        )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(worker, batch_index, batch): batch
+            for batch_index, batch in enumerate(batches, start=1)
+        }
+        for future in as_completed(futures):
+            batch_result = future.result()
+            results.append(batch_result)
+            completed_entries += len(batch_result.batch)
+            if progress:
+                progress("translating", completed_entries, progress_total)
+    return results
+
+
+def _translate_one_batch(
+    batch_index: int,
+    batch_count: int,
+    batch: OrderedDict[str, str],
+    api_key: str,
+    model: str,
+    style: str,
+    logger: LogCallback | None,
+    label: str,
+    translator: DeepSeekTranslator | None,
+) -> _BatchResult:
+    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
+    msg = f"DeepSeek batch {batch_index}/{batch_count}: {len(batch)} {label}."
+    _log.info(msg)
+    if logger:
+        logger(msg)
+    try:
+        return _BatchResult(batch_index=batch_index, batch=batch, result=client.translate_batch(batch, style=style))
+    except Exception as exc:  # noqa: BLE001
+        msg = f"Batch {batch_index} failed, preserving source text for this batch: {exc}"
+        _log.error(msg)
+        if logger:
+            logger(msg)
+        return _BatchResult(batch_index=batch_index, batch=batch, result=dict(batch), error=exc)
+
+
+def _resolve_max_workers(max_workers: int | None, batch_count: int) -> int:
+    if batch_count <= 0:
+        return 1
+    value = max_workers
+    if value is None:
+        raw_value = os.getenv(MAX_WORKERS_ENV)
+        if raw_value:
+            try:
+                value = int(raw_value)
+            except ValueError:
+                _log.warning("%s must be an integer, falling back to %d", MAX_WORKERS_ENV, DEFAULT_MAX_WORKERS)
+                value = DEFAULT_MAX_WORKERS
+        else:
+            value = DEFAULT_MAX_WORKERS
+    if value <= 0:
+        raise ValueError("max_workers must be greater than zero.")
+    return min(value, batch_count)
+
+
+def _guard_translation(source_text: str, translated_text: str) -> tuple[str, list[str]]:
+    token_warnings = preserved_token_warnings(source_text, translated_text)
+    if token_warnings:
+        return source_text, [*token_warnings, "Unsafe translation discarded; source text preserved."]
+    return translated_text, []
 
 
 def _lang_value_to_text(value: LangValue) -> str:

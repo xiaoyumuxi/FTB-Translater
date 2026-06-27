@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,33 @@ class FakeTranslator:
 
     def translate_batch(self, entries, style):
         return {key: f"汉化:{value}" for key, value in entries.items()}
+
+
+class UnsafeTranslator:
+    model = "deepseek-v4-flash"
+
+    def translate_batch(self, entries, style):
+        return {key: "破坏格式的译文" for key in entries}
+
+
+class TrackingTranslator:
+    model = "deepseek-v4-flash"
+
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    def translate_batch(self, entries, style):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.05)
+            return {key: f"汉化:{value}" for key, value in entries.items()}
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class CoreTests(unittest.TestCase):
@@ -100,6 +129,9 @@ class CoreTests(unittest.TestCase):
     def test_format_guard_warns_for_missing_placeholder(self) -> None:
         self.assertTrue(preserved_token_warnings("Get %s from <item:minecraft:stone>", "获取石头"))
 
+    def test_format_guard_warns_for_lost_newline(self) -> None:
+        self.assertTrue(preserved_token_warnings("Line one\nLine two", "第一行 第二行"))
+
     def test_translate_quests_lang_integration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,6 +156,48 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(
                 json.loads((quests / ".ftb-translater" / "report-latest.json").read_text(encoding="utf-8"))
             )
+
+    def test_translate_quests_lang_runs_batches_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quests = root / "config" / "ftbquests" / "quests"
+            lang = quests / "lang"
+            lang.mkdir(parents=True)
+            write_lang_snbt(
+                lang / "en_us.snbt",
+                {"a": "One", "b": "Two", "c": "Three", "d": "Four"},
+            )
+            translator = TrackingTranslator()
+
+            translate_quests_lang(
+                quests,
+                api_key="unused",
+                batch_size=1,
+                translator=translator,
+                max_workers=3,
+            )
+
+            self.assertGreater(translator.max_active, 1)
+
+    def test_translate_quests_lang_preserves_source_when_format_tokens_are_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quests = root / "config" / "ftbquests" / "quests"
+            lang = quests / "lang"
+            lang.mkdir(parents=True)
+            source = "Use &e%s&r from <item:minecraft:stone>\\nNext"
+            write_lang_snbt(lang / "en_us.snbt", {"desc": source})
+
+            report = translate_quests_lang(
+                quests,
+                api_key="unused",
+                batch_size=1,
+                translator=UnsafeTranslator(),
+            )
+
+            output = parse_lang_snbt((lang / "zh_cn.snbt").read_text(encoding="utf-8"))
+            self.assertEqual(output["desc"], source)
+            self.assertTrue(report.warnings["desc"])
 
     def test_chapter_segments_extract_and_translate_auto(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

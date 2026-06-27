@@ -8,15 +8,26 @@ _log = get_logger(__name__)
 
 TOKEN_PATTERNS = [
     re.compile(r"§[0-9a-fk-or]", re.IGNORECASE),
+    re.compile(r"&[0-9a-fk-or]", re.IGNORECASE),
+    re.compile(r"\\[nrt\"'\\]"),
     re.compile(r"%(?:\d+\$)?[+#\- 0,(]*\d*(?:\.\d+)?[bcdeEufFgGosxX]"),
     re.compile(r"\{[^{}\n]+\}"),
     re.compile(r"<[^<>\n]+>"),
     re.compile(r"#[a-z0-9_.:-]+", re.IGNORECASE),
 ]
 
+CONTROL_CHAR_NAMES = {
+    "\n": "newline",
+    "\r": "carriage return",
+    "\t": "tab",
+}
+
 
 def preserved_token_warnings(source: str, translated: str) -> list[str]:
     warnings: list[str] = []
+    for char, name in CONTROL_CHAR_NAMES.items():
+        if source.count(char) != translated.count(char):
+            warnings.append(f"Control character count mismatch for {name}")
     for pattern in TOKEN_PATTERNS:
         source_tokens = pattern.findall(source)
         translated_tokens = pattern.findall(translated)

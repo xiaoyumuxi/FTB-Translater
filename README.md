@@ -37,6 +37,14 @@ You can copy `.env.example` to `.env` and replace the placeholder if you prefer 
 
 The app automatically chunks translation requests. There is no batch-size setting in the UI.
 During translation, the log panel shows DeepSeek calls, batch progress, backup creation, and overwrite targets.
+DeepSeek batches run concurrently by default. Override the worker count when needed:
+
+```powershell
+$env:FTB_TRANSLATER_CONCURRENCY=6
+```
+
+Translations that drop protected formatting tokens such as `&e`, `%s`, `<item:...>`, or literal
+escape sequences such as `\n` are discarded for that entry and the original source text is preserved.
 
 ## Output
 
