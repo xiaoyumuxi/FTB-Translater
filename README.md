@@ -124,3 +124,27 @@ $env:FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES=20
 ftb-test
 ftb-test-e2e
 ```
+
+## 打包
+
+本地打包 Windows 版本：
+
+```powershell
+python -m pip install -e .
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name FTB-Translater --collect-data customtkinter main.py
+```
+
+输出文件：
+
+```text
+dist/FTB-Translater.exe
+```
+
+仓库也提供了 GitHub Actions 跨平台打包流水线：`.github/workflows/build.yml`。
+
+- push 到 `main` / `master` 或发起 PR 时，会在 Windows、macOS、Linux 上运行单元测试并打包。
+- Windows 产物：`FTB-Translater-windows.exe`
+- macOS 产物：`FTB-Translater-macos.dmg`
+- Linux 产物：`FTB-Translater-linux`
+- 推送 `v*` 格式的 tag，例如 `v0.1.0`，会自动把三端产物上传到 GitHub Release。

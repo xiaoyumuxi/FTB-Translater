@@ -1,0 +1,129 @@
+name: Build Desktop App
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.suffix }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: windows
+          - os: macos-latest
+            suffix: macos
+          - os: ubuntu-latest
+            suffix: linux
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Linux GUI runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install project and build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller
+
+      - name: Run unit tests
+        run: python -m tests.run_groups unit
+
+      - name: Build Windows exe
+        if: runner.os == 'Windows'
+        run: >
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --windowed
+          --name FTB-Translater
+          --collect-data customtkinter
+          main.py
+
+      - name: Prepare Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item "dist/FTB-Translater.exe" "artifacts/FTB-Translater-windows.exe" -Force
+          Get-Item "artifacts/FTB-Translater-windows.exe"
+
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        run: >
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --windowed
+          --name FTB-Translater
+          --collect-data customtkinter
+          main.py
+
+      - name: Prepare macOS dmg
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p artifacts
+          hdiutil create \
+            -volname FTB-Translater \
+            -srcfolder dist/FTB-Translater.app \
+            -ov \
+            -format UDZO \
+            artifacts/FTB-Translater-macos.dmg
+          ls -lh artifacts/FTB-Translater-macos.dmg
+
+      - name: Build Linux executable
+        if: runner.os == 'Linux'
+        run: >
+          python -m PyInstaller
+          --noconfirm
+          --clean
+          --onefile
+          --name FTB-Translater
+          --collect-data customtkinter
+          main.py
+
+      - name: Prepare Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p artifacts
+          cp dist/FTB-Translater artifacts/FTB-Translater-linux
+          chmod +x artifacts/FTB-Translater-linux
+          ls -lh artifacts/FTB-Translater-linux
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FTB-Translater-${{ matrix.suffix }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
