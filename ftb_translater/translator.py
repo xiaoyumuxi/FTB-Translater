@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import chapter_files, extract_chapter_segments, replace_chapter_segments
-from ftb_translater.deepseek_client import DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
+from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
 from ftb_translater.format_guard import preserved_token_warnings
 from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
@@ -80,6 +80,7 @@ def translate_quests_lang(
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
     max_workers: int | None = None,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -120,6 +121,7 @@ def translate_quests_lang(
         api_key=api_key,
         model=model,
         style=style,
+        base_url=base_url,
         logger=logger,
         progress=progress,
         progress_total=total_pending,
@@ -203,6 +205,7 @@ def translate_quests_chapters(
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
     max_workers: int | None = None,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -245,6 +248,7 @@ def translate_quests_chapters(
         api_key=api_key,
         model=model,
         style=style,
+        base_url=base_url,
         logger=logger,
         progress=progress,
         progress_total=len(pending),
@@ -319,15 +323,34 @@ def translate_quests_auto(
     logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
     max_workers: int | None = None,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
     mode = detect_source_mode(quests_dir)
     _log.info("translate_quests_auto: mode=%s quests_dir=%s", mode, quests_dir)
     if mode == "lang":
         return translate_quests_lang(
-            quests_dir, api_key, batch_size, model, style, progress, logger, translator, max_workers
+            quests_dir=quests_dir,
+            api_key=api_key,
+            batch_size=batch_size,
+            model=model,
+            style=style,
+            base_url=base_url,
+            progress=progress,
+            logger=logger,
+            translator=translator,
+            max_workers=max_workers,
         )
     return translate_quests_chapters(
-        quests_dir, api_key, batch_size, model, style, progress, logger, translator, max_workers
+        quests_dir=quests_dir,
+        api_key=api_key,
+        batch_size=batch_size,
+        model=model,
+        style=style,
+        base_url=base_url,
+        progress=progress,
+        logger=logger,
+        translator=translator,
+        max_workers=max_workers,
     )
 
 
@@ -336,6 +359,7 @@ def _translate_batches(
     api_key: str,
     model: str,
     style: str,
+    base_url: str,
     logger: LogCallback | None,
     progress: ProgressCallback | None,
     progress_total: int,
@@ -367,6 +391,7 @@ def _translate_batches(
                 api_key=api_key,
                 model=model,
                 style=style,
+                base_url=base_url,
                 logger=logger,
                 label=label,
                 translator=translator,
@@ -384,7 +409,7 @@ def _translate_batches(
         if worker_translator is None:
             worker_translator = getattr(thread_state, "translator", None)
             if worker_translator is None:
-                worker_translator = DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
+                worker_translator = DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
                 thread_state.translator = worker_translator
         return _translate_one_batch(
             batch_index=batch_index,
@@ -393,6 +418,7 @@ def _translate_batches(
             api_key=api_key,
             model=model,
             style=style,
+            base_url=base_url,
             logger=logger,
             label=label,
             translator=worker_translator,
@@ -419,11 +445,12 @@ def _translate_one_batch(
     api_key: str,
     model: str,
     style: str,
+    base_url: str,
     logger: LogCallback | None,
     label: str,
     translator: DeepSeekTranslator | None,
 ) -> _BatchResult:
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
+    client = translator or DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
     msg = f"DeepSeek batch {batch_index}/{batch_count}: {len(batch)} {label}."
     _log.info(msg)
     if logger:

@@ -28,7 +28,7 @@ python main.py
 `config/ftbquests/quests`，甚至直接选择 `lang` 或 `chapters` 目录。程序会自动定位
 FTB Quests 任务目录。
 
-在界面里填写并保存 DeepSeek API Key。Key 会以明文保存到项目根目录的 `.env`：
+在界面左侧进入“设置”，填写并保存 DeepSeek API Key。Key 会以明文保存到项目根目录的 `.env`：
 
 ```text
 DEEPSEEK_API_KEY=your_key_here
@@ -36,12 +36,20 @@ DEEPSEEK_API_KEY=your_key_here
 
 也可以复制 `.env.example` 为 `.env`，然后手动填写 Key。
 
+设置面板还可以配置：
+
+- DeepSeek API 地址：`DEEPSEEK_BASE_URL`
+- 模型名：`DEEPSEEK_MODEL`
+- 翻译风格：`FTB_TRANSLATER_STYLE`
+- 批大小：`FTB_TRANSLATER_BATCH_SIZE`，填 `auto` 使用自动策略
+- 并发数：`FTB_TRANSLATER_CONCURRENCY`，填 `auto` 使用自动策略
+
 ## 翻译策略
 
-程序会自动切分翻译请求，并根据当前任务规模选择一个保守的 DeepSeek 并发数。界面里不需要手动设置批大小。
+程序默认会自动切分翻译请求，并根据当前任务规模选择一个保守的 DeepSeek 并发数；也可以在设置面板手动覆盖批大小和并发数。
 翻译时，日志区域会显示 DeepSeek 调用、批次进度、备份创建和覆盖写入目标。
 
-如需手动指定并发数：
+如需手动指定并发数，可以直接在设置面板填写，也可以用环境变量：
 
 ```powershell
 $env:FTB_TRANSLATER_CONCURRENCY=6

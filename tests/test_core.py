@@ -9,7 +9,18 @@ from pathlib import Path
 
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import count_chapter_segments, extract_chapter_segments
-from ftb_translater.config import ENV_KEY, load_api_key, save_api_key
+from ftb_translater.config import (
+    BASE_URL_KEY,
+    BATCH_SIZE_KEY,
+    CONCURRENCY_KEY,
+    ENV_KEY,
+    MODEL_KEY,
+    STYLE_KEY,
+    load_config_values,
+    load_api_key,
+    save_config_values,
+    save_api_key,
+)
 from ftb_translater.format_guard import preserved_token_warnings
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
@@ -120,6 +131,32 @@ class CoreTests(unittest.TestCase):
             save_api_key("sk-test", root)
             self.assertEqual((root / ".env").read_text(encoding="utf-8").strip(), f"{ENV_KEY}=sk-test")
             self.assertEqual(load_api_key(root), "sk-test")
+
+    def test_save_and_load_app_config_values_preserves_unrelated_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text("UNRELATED=keep\n", encoding="utf-8")
+            save_config_values(
+                {
+                    ENV_KEY: "sk-test",
+                    BASE_URL_KEY: "https://api.example.test",
+                    MODEL_KEY: "deepseek-test",
+                    STYLE_KEY: "style",
+                    BATCH_SIZE_KEY: "12",
+                    CONCURRENCY_KEY: "3",
+                },
+                root,
+            )
+
+            text = (root / ".env").read_text(encoding="utf-8")
+            self.assertIn("UNRELATED=keep", text)
+            values = load_config_values(root)
+            self.assertEqual(values[ENV_KEY], "sk-test")
+            self.assertEqual(values[BASE_URL_KEY], "https://api.example.test")
+            self.assertEqual(values[MODEL_KEY], "deepseek-test")
+            self.assertEqual(values[STYLE_KEY], "style")
+            self.assertEqual(values[BATCH_SIZE_KEY], "12")
+            self.assertEqual(values[CONCURRENCY_KEY], "3")
 
     def test_cache_hit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
